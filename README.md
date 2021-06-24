@@ -8,7 +8,10 @@ This CloudFormation stack helps you to integrate your GitLab to AWS CodeBuild qu
 
 ## Usage
 
-1. Launch this stack.
+1. Click the following button to launch the CloudFormation Stack in your account.
+
+   [![Launch Stack](./img/launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/template?stackName=GitLab-CodeBuild&templateURL=https://wjinghui-public.s3.amazonaws.com/templates/gitlab-codebuild-quickstart.yaml)
+
 2. (Optional) Modify your AWS CodeBuild service role to add permissions like Amazon ECR access. You can find the role ARN in the output of this stack if you use `admin` or `minimal` as the input parameter `RoleArnForCodeBuild`. You can always modify this role later.
 3. Modify your repository to adapt your build command. The default build command is `bash build.sh`, in this case your need a file `build.sh` in your repository to specify your build steps.
 4. Create a webhook in your GitLab project settings.

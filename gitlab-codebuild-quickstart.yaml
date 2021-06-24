@@ -1,0 +1,365 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Using GitLab Webhook to trigger AWS CodeBuild through Amazon API Gateway and AWS Lambda.
+
+Parameters:
+  GitLabUsername:
+    Type: String
+    Default: root
+    Description: Username to access your GitLab.
+  GitLabPassword:
+    Type: String
+    NoEcho: true
+    Description: Password to access your GitLab. Will be stored in AWS Secrets Manager.
+  WebhookSecretToken:
+    Type: String
+    NoEcho: true
+    Description: Use this secret token to secure your webhook. Will be stored in AWS Secrets Manager.
+  BuildCommand:
+    Type: String
+    Default: bash build.sh
+    Description: This command will be run after 'git clone' and 'cd REPO_NAME'.
+  ConcurrentBuildLimit:
+    Type: Number
+    Default: 0
+    Description: How many concurrent build tasks should be allowed. If the current build count meets this limit, new builds are throttled and are not run. 0 means there is no limit.
+  RoleArnForCodeBuild:
+    Type: String
+    Description: The IAM role ARN for CodeBuild. Use "admin" to create an administrator role. Use "minimal" to create a role with minimal permissions.
+    Default: minimal
+  CodeBuildInstanceSize:
+    Type: String
+    Default: BUILD_GENERAL1_SMALL
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+      - BUILD_GENERAL1_2XLARGE
+    Description: How many vCPU and memory you need to build your project. See https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-compute-types.html
+  BuildSystem:
+    Type: String
+    Default: Ubuntu-20.04-x86
+    Description: Which system you want to build on.
+    AllowedValues:
+      - Ubuntu-20.04-x86
+      - Ubuntu-18.04-x86
+      - Amazon-Linux-2-x86
+      - Amazon-Linux-2-ARM
+  BuildEnvironment:
+    Type: String
+    Default: Linux-x86
+    AllowedValues:
+      - Linux-x86
+      - Linux-ARM
+      - Linux-x86-GPU
+    Description: Which architecture you want to build on.
+  UseDocker:
+    Type: String
+    Default: no
+    AllowedValues:
+      - yes
+      - no
+    Description: Do you need to use docker?
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "GitLab Credentials"
+        Parameters:
+          - GitLabUsername
+          - GitLabPassword
+          - WebhookSecretToken
+      - Label:
+          default: "AWS CodeBuild Configuration"
+        Parameters:
+          - BuildEnvironment
+          - BuildSystem
+          - CodeBuildInstanceSize
+          - RoleArnForCodeBuild
+          - BuildCommand
+          - UseDocker
+          - ConcurrentBuildLimit
+
+Conditions:
+  UseAdminForCodeBuild: !Equals [!Ref RoleArnForCodeBuild, admin]
+  UseMinimalForCodeBuild: !Equals [!Ref RoleArnForCodeBuild, minimal]
+  NoConcurrentBuildLimit: !Equals [!Ref ConcurrentBuildLimit, 0]
+
+Mappings:
+  BuildArchMap:
+    Linux-x86:
+      Type: LINUX_CONTAINER
+    Linux-ARM:
+      Type: ARM_CONTAINER
+    Linux-x86-GPU:
+      Type: LINUX_GPU_CONTAINER
+  BuildImageMap:
+    Ubuntu-20.04-x86:
+      Image: aws/codebuild/standard:5.0
+    Ubuntu-18.04-x86:
+      Image: aws/codebuild/standard:4.0
+    Amazon-Linux-2-x86:
+      Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+    Amazon-Linux-2-ARM:
+      Image: aws/codebuild/amazonlinux2-aarch64-standard:2.0
+
+Resources:
+  SecretGitLabPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        !Join [
+          "/",
+          ["CloudFormationStack", !Ref AWS::StackName, "GitLabPassword"],
+        ]
+      SecretString: !Ref GitLabPassword
+  SecretGitLabWebhookToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        !Join ["/", ["CloudFormationStack", !Ref AWS::StackName, "GitLabToken"]]
+      SecretString: !Ref WebhookSecretToken
+
+  RoleForLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName:
+        !Join ["-", [LambdaAccessCodeBuildAndSecrets, !Ref AWS::StackName]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "codebuild:StartBuild"
+            Resource: !GetAtt BuildProject.Arn
+          - Effect: Allow
+            Action:
+              - "secretsmanager:GetSecretValue"
+            Resource: !Ref SecretGitLabWebhookToken
+      Roles:
+        - !Ref RoleForLambda
+
+  AdminRoleForCodeBuild:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+    Condition: UseAdminForCodeBuild
+
+  MinimalRoleForCodeBuild:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+    Condition: UseMinimalForCodeBuild
+
+  MinimalCodeBuildRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName:
+        !Join ["-", [CodeBuildAccessSecretsManager, !Ref AWS::StackName]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "secretsmanager:GetSecretValue"
+            Resource: !Ref SecretGitLabPassword
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              - !Sub
+                - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${BUILD_PROJECT_NAME}"
+                - { BUILD_PROJECT_NAME: !Ref BuildProject }
+              - !Sub
+                - "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${BUILD_PROJECT_NAME}:*"
+                - { BUILD_PROJECT_NAME: !Ref BuildProject }
+          - Effect: Allow
+            Action:
+              - "s3:PutObject"
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:GetBucketAcl"
+              - "s3:GetBucketLocation"
+            Resource: !Sub "arn:aws:s3:::codepipeline-${AWS::Region}-*"
+          - Effect: Allow
+            Action:
+              - "codebuild:CreateReportGroup"
+              - "codebuild:CreateReport"
+              - "codebuild:UpdateReport"
+              - "codebuild:BatchPutTestCases"
+              - "codebuild:BatchPutCodeCoverages"
+            Resource: !Sub
+              - "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${BUILD_PROJECT_NAME}-*"
+              - { BUILD_PROJECT_NAME: !Ref BuildProject }
+      Roles:
+        - !Ref MinimalRoleForCodeBuild
+    Condition: UseMinimalForCodeBuild
+
+  WebhookFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          codebuild = boto3.client('codebuild')
+          secrets = boto3.client('secretsmanager')
+
+
+          def lambda_handler(event, context):
+            # check token
+            token = secrets.get_secret_value(
+                SecretId=os.environ['SECRET_WEBHOOK_ARN'])['SecretString']
+            if event['headers'].get('x-gitlab-token',
+                                    event['headers'].get('X-Gitlab-Token')) != token:
+              return {'statusCode': 401, 'body': 'Bad Token'}
+
+            body = json.loads(event['body'])
+            http_url = body['project']['git_http_url']
+            repo = body['repository']['name']
+            command = os.environ['COMMAND']
+            projectName = os.environ['CODEBUILD_PROJECT_NAME']
+
+            codebuild.start_build(
+                projectName=projectName,
+                environmentVariablesOverride=[{
+                    'name': 'GIT_URL',
+                    'value': http_url,
+                    'type': 'PLAINTEXT'
+                }, {
+                    'name': 'REPO',
+                    'value': repo,
+                    'type': 'PLAINTEXT'
+                }, {
+                    'name': 'COMMAND',
+                    'value': command,
+                    'type': 'PLAINTEXT'
+                }, {
+                    'name': 'GITLAB_USERNAME',
+                    'value': os.environ['GITLAB_USERNAME'],
+                    'type': 'PLAINTEXT'
+                }, {
+                    'name': 'GITLAB_PASSWORD',
+                    'value': os.environ['SECRET_GITLAB_PASSWORD_ARN'],
+                    'type': 'SECRETS_MANAGER'
+                }],
+            )
+
+            return {'statusCode': 200, 'body': ''}
+      Environment:
+        Variables:
+          COMMAND: !Ref BuildCommand
+          SECRET_WEBHOOK_ARN: !Ref SecretGitLabWebhookToken
+          CODEBUILD_PROJECT_NAME: !Ref BuildProject
+          GITLAB_USERNAME: !Ref GitLabUsername
+          SECRET_GITLAB_PASSWORD_ARN: !Ref SecretGitLabPassword
+      Handler: index.lambda_handler
+      Role: !GetAtt RoleForLambda.Arn
+      Runtime: python3.8
+
+  ExposedHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: GitLab webhook
+      Target: !GetAtt WebhookFunction.Arn
+      ProtocolType: HTTP
+
+  PermissionForApiGatewayToTriggerLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt WebhookFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiID}/*/$default
+        - { ApiID: !Ref ExposedHttpApi }
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      ConcurrentBuildLimit:
+        !If [
+          NoConcurrentBuildLimit,
+          !Ref AWS::NoValue,
+          !Ref ConcurrentBuildLimit,
+        ]
+      ServiceRole:
+        !If [
+          UseAdminForCodeBuild,
+          !GetAtt AdminRoleForCodeBuild.Arn,
+          !If [
+            UseMinimalForCodeBuild,
+            !GetAtt MinimalRoleForCodeBuild.Arn,
+            !Ref RoleArnForCodeBuild,
+          ],
+        ]
+      Environment:
+        ComputeType: !Ref CodeBuildInstanceSize
+        Image: !FindInMap [BuildImageMap, !Ref BuildSystem, Image]
+        PrivilegedMode: !Ref UseDocker
+        Type: !FindInMap [BuildArchMap, !Ref BuildEnvironment, Type]
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          run-as: root
+          phases:
+            build:
+              commands:
+                - git clone `echo $GIT_URL | sed "s#//#//${GITLAB_USERNAME}:${GITLAB_PASSWORD}@#"`
+                - cd ${REPO} && eval ${COMMAND}
+
+Outputs:
+  WebhookURL:
+    Description: The URL you need for GitLab Webhook.
+    Value: !GetAtt ExposedHttpApi.ApiEndpoint
+  MinimalRoleArnForCodeBuild:
+    Description: The IAM role for CodeBuild with minimal permissions. You can add more permissions as you need.
+    Value: !GetAtt MinimalRoleForCodeBuild.Arn
+    Condition: UseMinimalForCodeBuild
+  AdminRoleArnForCodeBuild:
+    Description: The IAM role for CodeBuild with administrator permissions. You can add more permissions as you need.
+    Value: !GetAtt AdminRoleForCodeBuild.Arn
+    Condition: UseAdminForCodeBuild

@@ -38,7 +38,7 @@ aws ecr get-login-password --region us-east-1 | docker login \
 docker build -t myImage .
 docker tag myImage 1234567890.dkr.ecr.us-east-1.amazonaws.com/myImage
 
-# create ECR registry
+# create ECR repository
 aws ecr create-repository --repository-name=myImage
 
 # publish image
